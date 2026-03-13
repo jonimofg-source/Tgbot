@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -70,6 +70,17 @@ CONFIRM_DELETE_KB = ReplyKeyboardMarkup(
 GENDER_MAP = {"👨 парень": "male", "👩 девушка": "female"}
 LOOKING_MAP = {"👨 парней": "male", "👩 девушек": "female", "💫 всех": "any"}
 
+EDIT_FIELD_MAP = {
+    "👤 Имя": "name",
+    "🎂 Возраст": "age",
+    "⚧ Пол": "gender",
+    "🔍 Кого ищу": "looking_for",
+    "🏙 Город": "city",
+    "📝 О себе": "bio",
+}
+
+
+# --- /start ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
@@ -87,7 +98,9 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.set_state(RegisterState.name)
 
 
-@router.message(RegisterState.name)
+# --- Регистрация ---
+
+@router.message(RegisterState.name, F.text)
 async def reg_name(message: Message, state: FSMContext) -> None:
     name = message.text.strip()
     if not name or len(name) > 50:
@@ -98,7 +111,12 @@ async def reg_name(message: Message, state: FSMContext) -> None:
     await state.set_state(RegisterState.age)
 
 
-@router.message(RegisterState.age)
+@router.message(RegisterState.name)
+async def reg_name_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Пожалуйста, отправь текстовое сообщение с именем:")
+
+
+@router.message(RegisterState.age, F.text)
 async def reg_age(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     if not text.isdigit() or not (14 <= int(text) <= 100):
@@ -107,6 +125,11 @@ async def reg_age(message: Message, state: FSMContext) -> None:
     await state.update_data(age=int(text))
     await message.answer("⚧ Укажи свой пол:", reply_markup=GENDER_KB)
     await state.set_state(RegisterState.gender)
+
+
+@router.message(RegisterState.age)
+async def reg_age_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Отправь число — свой возраст (14–100):")
 
 
 @router.message(RegisterState.gender, F.text.casefold().in_(GENDER_MAP))
@@ -133,7 +156,7 @@ async def reg_looking_for_invalid(message: Message, state: FSMContext) -> None:
     await message.answer("⚠️ Выбери один из вариантов на клавиатуре.", reply_markup=LOOKING_KB)
 
 
-@router.message(RegisterState.city)
+@router.message(RegisterState.city, F.text)
 async def reg_city(message: Message, state: FSMContext) -> None:
     city = message.text.strip()
     if not city or len(city) > 50:
@@ -144,7 +167,12 @@ async def reg_city(message: Message, state: FSMContext) -> None:
     await state.set_state(RegisterState.bio)
 
 
-@router.message(RegisterState.bio)
+@router.message(RegisterState.city)
+async def reg_city_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Пожалуйста, отправь текстовое сообщение с названием города:")
+
+
+@router.message(RegisterState.bio, F.text)
 async def reg_bio(message: Message, state: FSMContext) -> None:
     bio = message.text.strip()
     if not bio or len(bio) > 500:
@@ -164,6 +192,13 @@ async def reg_bio(message: Message, state: FSMContext) -> None:
     text = profile_service.format_profile(profile)
     await message.answer(f"🎉 Анкета создана!\n\n{text}", reply_markup=MAIN_MENU_KB)
 
+
+@router.message(RegisterState.bio)
+async def reg_bio_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Пожалуйста, отправь текстовое описание о себе:")
+
+
+# --- Главное меню ---
 
 @router.message(F.text == "👤 Моя анкета")
 async def show_my_profile(message: Message, state: FSMContext) -> None:
@@ -204,6 +239,8 @@ async def cancel_delete(message: Message) -> None:
     await message.answer("👌 Удаление отменено.", reply_markup=MAIN_MENU_KB)
 
 
+# --- Редактирование ---
+
 @router.message(F.text == "✏️ Редактировать")
 async def start_edit(message: Message, state: FSMContext) -> None:
     if not profile_service.has_profile(message.from_user.id):
@@ -211,16 +248,6 @@ async def start_edit(message: Message, state: FSMContext) -> None:
         return
     await message.answer("✏️ Что хочешь изменить?", reply_markup=EDIT_KB)
     await state.set_state(EditState.choose_field)
-
-
-EDIT_FIELD_MAP = {
-    "👤 Имя": "name",
-    "🎂 Возраст": "age",
-    "⚧ Пол": "gender",
-    "🔍 Кого ищу": "looking_for",
-    "🏙 Город": "city",
-    "📝 О себе": "bio",
-}
 
 
 @router.message(EditState.choose_field, F.text == "❌ Отмена")
@@ -249,7 +276,7 @@ async def edit_choose_field_invalid(message: Message, state: FSMContext) -> None
     await message.answer("⚠️ Выбери поле на клавиатуре или нажми ❌ Отмена.", reply_markup=EDIT_KB)
 
 
-@router.message(EditState.enter_value)
+@router.message(EditState.enter_value, F.text)
 async def edit_enter_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     field_name = data["edit_field"]
@@ -294,6 +321,13 @@ async def edit_enter_value(message: Message, state: FSMContext) -> None:
         await message.answer("😔 Ошибка обновления анкеты.", reply_markup=MAIN_MENU_KB)
 
 
+@router.message(EditState.enter_value)
+async def edit_enter_value_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Пожалуйста, отправь текстовое сообщение:")
+
+
+# --- Просмотр анкет ---
+
 @router.message(F.text == "💘 Смотреть анкеты")
 async def browse_profiles(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -323,10 +357,21 @@ async def like_profile(message: Message, state: FSMContext) -> None:
 
     if is_match:
         candidate = profile_service.get_profile(candidate_id)
+        my_profile = profile_service.get_profile(user_id)
         candidate_name = candidate.name if candidate else "Кто-то"
+        my_name = my_profile.name if my_profile else "Кто-то"
         await message.answer(
-            f"🎉💘 У вас взаимная симпатия с {candidate_name}! Можете написать друг другу."
+            f"🎉💘 У вас взаимная симпатия с {candidate_name}!\n"
+            f"Напиши ему/ей — tg://user?id={candidate_id}"
         )
+        try:
+            await message.bot.send_message(
+                candidate_id,
+                f"🎉💘 У тебя взаимная симпатия с {my_name}!\n"
+                f"Напиши ему/ей — tg://user?id={user_id}"
+            )
+        except Exception:
+            pass
 
     next_candidate = match_service.get_next_profile(user_id)
     if next_candidate is None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 
@@ -212,9 +212,7 @@ class MatchService:
                 continue
             if user_profile.looking_for != "any" and profile.gender != user_profile.looking_for:
                 continue
-            yield_profile = True
-            if yield_profile:
-                return profile
+            return profile
         return None
 
     def cleanup_user(self, user_id: int) -> None:
