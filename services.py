@@ -171,15 +171,16 @@ class ProfileService:
         return self._repo.delete(user_id)
 
     def format_profile(self, profile: Profile) -> str:
-        gender_label = "Male" if profile.gender == "male" else "Female"
-        looking_label = "Male" if profile.looking_for == "male" else ("Female" if profile.looking_for == "female" else "Any")
+        gender_label = "👨 Парень" if profile.gender == "male" else "👩 Девушка"
+        looking_map = {"male": "👨 Парней", "female": "👩 Девушек", "any": "💫 Всех"}
+        looking_label = looking_map.get(profile.looking_for, "💫 Всех")
         return (
-            f"Name: {profile.name}\n"
-            f"Age: {profile.age}\n"
-            f"Gender: {gender_label}\n"
-            f"Looking for: {looking_label}\n"
-            f"City: {profile.city}\n"
-            f"Bio: {profile.bio}"
+            f"👤 Имя: {profile.name}\n"
+            f"🎂 Возраст: {profile.age}\n"
+            f"⚧ Пол: {gender_label}\n"
+            f"🔍 Ищу: {looking_label}\n"
+            f"🏙 Город: {profile.city}\n"
+            f"📝 О себе: {profile.bio}"
         )
 
 
