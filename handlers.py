@@ -10,6 +10,7 @@ from aiogram.types import (
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.base import StorageKey
 
 from services import profile_service, match_service, report_service, chat_service
 
@@ -118,6 +119,12 @@ def _normalize(text: str) -> str:
     return text.strip().casefold()
 
 
+def _partner_fsm(state: FSMContext, bot_id: int, partner_id: int) -> FSMContext:
+    """Create an FSMContext for another user to set/clear their state."""
+    key = StorageKey(bot_id=bot_id, chat_id=partner_id, user_id=partner_id)
+    return FSMContext(storage=state.storage, key=key)
+
+
 async def _send_profile(message: Message, profile, reply_markup=None):
     """Send profile with or without photo."""
     text = profile_service.format_profile(profile)
@@ -129,20 +136,6 @@ async def _send_profile(message: Message, profile, reply_markup=None):
         )
     else:
         await message.answer(text, reply_markup=reply_markup)
-
-
-async def _send_profile_to(bot, chat_id: int, profile, reply_markup=None):
-    """Send profile to a specific user by chat_id."""
-    text = profile_service.format_profile(profile)
-    if profile.photo_id:
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=profile.photo_id,
-            caption=text,
-            reply_markup=reply_markup,
-        )
-    else:
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
 
 # ============================================================
@@ -510,11 +503,11 @@ async def like_profile(message: Message, state: FSMContext) -> None:
         candidate_name = html.escape(candidate.name) if candidate else "Кто-то"
         my_name = html.escape(my_profile.name) if my_profile else "Кто-то"
 
-        chat_session = chat_service.create_chat(user_id, candidate_id)
+        chat_service.create_chat(user_id, candidate_id)
 
         chat_invite_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Начать чат", callback_data=f"chat_accept")],
-            [InlineKeyboardButton(text="⏩ Пропустить", callback_data=f"chat_decline")],
+            [InlineKeyboardButton(text="💬 Начать чат", callback_data="chat_accept")],
+            [InlineKeyboardButton(text="⏩ Пропустить", callback_data="chat_decline")],
         ])
 
         await message.answer(
@@ -652,7 +645,10 @@ async def chat_accept_callback(callback: CallbackQuery, state: FSMContext) -> No
     if session.both_accepted:
         partner_id = session.partner_of(user_id)
 
+        # Set ChatState.active for BOTH users
         await state.set_state(ChatState.active)
+        partner_ctx = _partner_fsm(state, callback.bot.id, partner_id)
+        await partner_ctx.set_state(ChatState.active)
 
         await callback.message.answer(
             "💬 Чат начался! Пиши сообщения — они будут пересланы собеседнику.\n"
@@ -684,6 +680,9 @@ async def chat_decline_callback(callback: CallbackQuery, state: FSMContext) -> N
     if session:
         partner_id = session.partner_of(user_id)
         if partner_id:
+            # Clear partner's state if they were waiting
+            partner_ctx = _partner_fsm(state, callback.bot.id, partner_id)
+            await partner_ctx.clear()
             try:
                 await callback.bot.send_message(
                     partner_id,
@@ -704,6 +703,9 @@ async def chat_end(message: Message, state: FSMContext) -> None:
     if session:
         partner_id = session.partner_of(user_id)
         if partner_id:
+            # Clear partner's ChatState.active so they don't stay stuck
+            partner_ctx = _partner_fsm(state, message.bot.id, partner_id)
+            await partner_ctx.clear()
             try:
                 await message.bot.send_message(
                     partner_id,
