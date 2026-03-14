@@ -4,5 +4,6 @@ profiles.json
 likes.json
 skips.json
 reports.json
+unban_requests.json
 *.tmp
 *.corrupted

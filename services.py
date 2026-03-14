@@ -90,6 +90,17 @@ class Report:
     timestamp: float = 0.0
     resolved: bool = False
     resolution: str = ""
+    photo_id: Optional[str] = None
+
+
+@dataclass
+class UnbanRequest:
+    id: int
+    user_id: int
+    reason: str
+    timestamp: float = 0.0
+    resolved: bool = False
+    resolution: str = ""
 
 
 @dataclass
@@ -266,6 +277,7 @@ class ReportRepository:
                     item.setdefault("timestamp", 0.0)
                     item.setdefault("resolved", False)
                     item.setdefault("resolution", "")
+                    item.setdefault("photo_id", None)
                     self._reports.append(Report(**item))
                 except (TypeError, KeyError) as e:
                     logger.warning("Пропущена некорректная жалоба: %s", e)
@@ -275,13 +287,15 @@ class ReportRepository:
     def _save(self) -> None:
         _atomic_save_json(self.DATA_FILE, [asdict(r) for r in self._reports])
 
-    def add(self, from_user: int, reported_user: int, reason: str) -> Report:
+    def add(self, from_user: int, reported_user: int, reason: str,
+            photo_id: Optional[str] = None) -> Report:
         report = Report(
             id=self._next_id,
             from_user=from_user,
             reported_user=reported_user,
             reason=reason,
             timestamp=time.time(),
+            photo_id=photo_id,
         )
         self._next_id += 1
         self._reports.append(report)
@@ -315,6 +329,68 @@ class ReportRepository:
     def remove_user_reports(self, user_id: int) -> None:
         self._reports = [r for r in self._reports if r.from_user != user_id and r.reported_user != user_id]
         self._save()
+
+
+class UnbanRequestRepository:
+    DATA_FILE = "unban_requests.json"
+
+    def __init__(self) -> None:
+        self._requests: list[UnbanRequest] = []
+        self._next_id: int = 1
+        self._load()
+
+    def _load(self) -> None:
+        data = _safe_load_json(self.DATA_FILE, default=[])
+        if isinstance(data, list):
+            for item in data:
+                try:
+                    item.setdefault("timestamp", 0.0)
+                    item.setdefault("resolved", False)
+                    item.setdefault("resolution", "")
+                    self._requests.append(UnbanRequest(**item))
+                except (TypeError, KeyError) as e:
+                    logger.warning("Пропущена некорректная заявка на разбан: %s", e)
+            if self._requests:
+                self._next_id = max(r.id for r in self._requests) + 1
+
+    def _save(self) -> None:
+        _atomic_save_json(self.DATA_FILE, [asdict(r) for r in self._requests])
+
+    def add(self, user_id: int, reason: str) -> UnbanRequest:
+        req = UnbanRequest(
+            id=self._next_id,
+            user_id=user_id,
+            reason=reason,
+            timestamp=time.time(),
+        )
+        self._next_id += 1
+        self._requests.append(req)
+        self._save()
+        return req
+
+    def get_unresolved(self) -> list[UnbanRequest]:
+        return [r for r in self._requests if not r.resolved]
+
+    def get_by_id(self, req_id: int) -> Optional[UnbanRequest]:
+        for r in self._requests:
+            if r.id == req_id:
+                return r
+        return None
+
+    def resolve(self, req_id: int, resolution: str) -> Optional[UnbanRequest]:
+        req = self.get_by_id(req_id)
+        if req is None:
+            return None
+        req.resolved = True
+        req.resolution = resolution
+        self._save()
+        return req
+
+    def has_pending(self, user_id: int) -> bool:
+        return any(r.user_id == user_id and not r.resolved for r in self._requests)
+
+    def count_unresolved(self) -> int:
+        return len(self.get_unresolved())
 
 
 class ChatRepository:
@@ -489,8 +565,9 @@ class ReportService:
     def __init__(self, repo: ReportRepository) -> None:
         self._repo = repo
 
-    def file_report(self, from_user: int, reported_user: int, reason: str) -> Report:
-        return self._repo.add(from_user, reported_user, reason)
+    def file_report(self, from_user: int, reported_user: int, reason: str,
+                    photo_id: Optional[str] = None) -> Report:
+        return self._repo.add(from_user, reported_user, reason, photo_id=photo_id)
 
     def get_unresolved(self) -> list[Report]:
         return self._repo.get_unresolved()
@@ -506,6 +583,28 @@ class ReportService:
 
     def cleanup_user(self, user_id: int) -> None:
         self._repo.remove_user_reports(user_id)
+
+
+class UnbanRequestService:
+    def __init__(self, repo: UnbanRequestRepository) -> None:
+        self._repo = repo
+
+    def submit(self, user_id: int, reason: str) -> Optional[UnbanRequest]:
+        if self._repo.has_pending(user_id):
+            return None
+        return self._repo.add(user_id, reason)
+
+    def has_pending(self, user_id: int) -> bool:
+        return self._repo.has_pending(user_id)
+
+    def get_unresolved(self) -> list[UnbanRequest]:
+        return self._repo.get_unresolved()
+
+    def resolve(self, req_id: int, resolution: str) -> Optional[UnbanRequest]:
+        return self._repo.resolve(req_id, resolution)
+
+    def count_unresolved(self) -> int:
+        return self._repo.count_unresolved()
 
 
 class ChatService:
@@ -540,9 +639,11 @@ profile_repo = ProfileRepository()
 like_repo = LikeRepository()
 skip_repo = SkipRepository()
 report_repo = ReportRepository()
+unban_repo = UnbanRequestRepository()
 chat_repo = ChatRepository()
 
 profile_service = ProfileService(profile_repo)
 match_service = MatchService(profile_repo, like_repo, skip_repo)
 report_service = ReportService(report_repo)
+unban_service = UnbanRequestService(unban_repo)
 chat_service = ChatService(chat_repo)

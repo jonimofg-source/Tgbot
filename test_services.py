@@ -8,6 +8,7 @@ from services import (
     Profile, ProfileRepository, LikeRepository, SkipRepository,
     ProfileService, MatchService, ReportRepository, ReportService,
     ChatRepository, ChatService,
+    UnbanRequestRepository, UnbanRequestService,
     _safe_load_json, _atomic_save_json,
 )
 
@@ -207,6 +208,11 @@ class TestReportRepository(unittest.TestCase):
         self.assertEqual(r.reported_user, 200)
         self.assertEqual(r.reason, "Спам")
         self.assertFalse(r.resolved)
+        self.assertIsNone(r.photo_id)
+
+    def test_add_report_with_photo(self):
+        r = self.repo.add(100, 200, "Спам", photo_id="photo123")
+        self.assertEqual(r.photo_id, "photo123")
 
     def test_get_unresolved(self):
         self.repo.add(100, 200, "Спам")
@@ -479,6 +485,11 @@ class TestReportService(unittest.TestCase):
         r = self.service.file_report(100, 200, "Спам")
         self.assertEqual(r.id, 1)
         self.assertEqual(r.reason, "Спам")
+        self.assertIsNone(r.photo_id)
+
+    def test_file_report_with_photo(self):
+        r = self.service.file_report(100, 200, "Спам", photo_id="img456")
+        self.assertEqual(r.photo_id, "img456")
 
     def test_get_unresolved(self):
         self.service.file_report(100, 200, "Спам")
@@ -546,6 +557,108 @@ class TestChatService(unittest.TestCase):
         self.service.accept(1)
         self.service.accept(2)
         self.assertEqual(self.service.stats()["active_chats"], 1)
+
+
+class TestUnbanRequestRepository(unittest.TestCase):
+    DATA_FILE = "test_unban_requests.json"
+
+    def setUp(self):
+        self.repo = UnbanRequestRepository()
+        self.repo.DATA_FILE = self.DATA_FILE
+        self.repo._requests = []
+        self.repo._next_id = 1
+
+    def tearDown(self):
+        if os.path.exists(self.DATA_FILE):
+            os.unlink(self.DATA_FILE)
+
+    def test_add_request(self):
+        r = self.repo.add(100, "Прошу разбан")
+        self.assertEqual(r.id, 1)
+        self.assertEqual(r.user_id, 100)
+        self.assertEqual(r.reason, "Прошу разбан")
+        self.assertFalse(r.resolved)
+
+    def test_get_unresolved(self):
+        self.repo.add(100, "Причина 1")
+        self.repo.add(200, "Причина 2")
+        self.assertEqual(len(self.repo.get_unresolved()), 2)
+
+    def test_resolve(self):
+        r = self.repo.add(100, "Причина")
+        resolved = self.repo.resolve(r.id, "accepted")
+        self.assertTrue(resolved.resolved)
+        self.assertEqual(resolved.resolution, "accepted")
+        self.assertEqual(len(self.repo.get_unresolved()), 0)
+
+    def test_resolve_nonexistent(self):
+        self.assertIsNone(self.repo.resolve(999, "accepted"))
+
+    def test_has_pending(self):
+        self.assertFalse(self.repo.has_pending(100))
+        self.repo.add(100, "Причина")
+        self.assertTrue(self.repo.has_pending(100))
+
+    def test_has_pending_after_resolve(self):
+        r = self.repo.add(100, "Причина")
+        self.repo.resolve(r.id, "rejected")
+        self.assertFalse(self.repo.has_pending(100))
+
+    def test_count_unresolved(self):
+        self.repo.add(100, "A")
+        r = self.repo.add(200, "B")
+        self.assertEqual(self.repo.count_unresolved(), 2)
+        self.repo.resolve(r.id, "accepted")
+        self.assertEqual(self.repo.count_unresolved(), 1)
+
+    def test_auto_increment_ids(self):
+        r1 = self.repo.add(100, "A")
+        r2 = self.repo.add(200, "B")
+        self.assertEqual(r1.id, 1)
+        self.assertEqual(r2.id, 2)
+
+
+class TestUnbanRequestService(unittest.TestCase):
+    def setUp(self):
+        self.repo = UnbanRequestRepository()
+        self.repo._requests = []
+        self.repo._next_id = 1
+        self.service = UnbanRequestService(self.repo)
+
+    def test_submit(self):
+        r = self.service.submit(100, "Прошу разбан")
+        self.assertIsNotNone(r)
+        self.assertEqual(r.user_id, 100)
+
+    def test_submit_duplicate_returns_none(self):
+        self.service.submit(100, "Первая")
+        result = self.service.submit(100, "Вторая")
+        self.assertIsNone(result)
+
+    def test_submit_after_resolve(self):
+        r = self.service.submit(100, "Первая")
+        self.service.resolve(r.id, "rejected")
+        r2 = self.service.submit(100, "Вторая")
+        self.assertIsNotNone(r2)
+
+    def test_has_pending(self):
+        self.assertFalse(self.service.has_pending(100))
+        self.service.submit(100, "Причина")
+        self.assertTrue(self.service.has_pending(100))
+
+    def test_get_unresolved(self):
+        self.service.submit(100, "A")
+        self.service.submit(200, "B")
+        self.assertEqual(len(self.service.get_unresolved()), 2)
+
+    def test_resolve(self):
+        r = self.service.submit(100, "Причина")
+        resolved = self.service.resolve(r.id, "accepted")
+        self.assertTrue(resolved.resolved)
+
+    def test_count_unresolved(self):
+        self.service.submit(100, "A")
+        self.assertEqual(self.service.count_unresolved(), 1)
 
 
 class TestSafeLoadJson(unittest.TestCase):

@@ -15,6 +15,7 @@ from aiogram.fsm.state import StatesGroup, State
 
 from services import (
     is_admin, profile_service, match_service, report_service, chat_service,
+    unban_service,
 )
 
 admin_router = Router()
@@ -32,6 +33,7 @@ class AdminUnbanState(StatesGroup):
 ADMIN_MENU_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📋 Жалобы")],
+        [KeyboardButton(text="📨 Заявки на разбан")],
         [KeyboardButton(text="🔨 Бан"), KeyboardButton(text="🔓 Разбан")],
         [KeyboardButton(text="🔙 Выход из админки")],
     ],
@@ -73,6 +75,7 @@ async def admin_stats(message: Message) -> None:
     m_stats = match_service.stats()
     c_stats = chat_service.stats()
     unresolved = report_service.count_unresolved()
+    unban_pending = unban_service.count_unresolved()
 
     text = (
         "📊 <b>Статистика бота</b>\n\n"
@@ -81,7 +84,8 @@ async def admin_stats(message: Message) -> None:
         f"🚫 Забанено: {p_stats['banned']}\n"
         f"❤️ Всего лайков: {m_stats['total_likes']}\n"
         f"💬 Активных чатов: {c_stats['active_chats']}\n"
-        f"⚠️ Нерешённых жалоб: {unresolved}"
+        f"⚠️ Нерешённых жалоб: {unresolved}\n"
+        f"📨 Заявок на разбан: {unban_pending}"
     )
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=ADMIN_MENU_KB)
 
@@ -92,6 +96,7 @@ async def admin_stats(message: Message) -> None:
 
 def _format_report_text(report, reported_name: str, total_reports: int) -> str:
     ts = time.strftime("%d.%m.%Y %H:%M", time.localtime(report.timestamp))
+    photo_line = "\n📷 Фото: приложено" if report.photo_id else ""
     return (
         f"⚠️ <b>Жалоба #{report.id}</b>\n"
         f"📅 {ts}\n"
@@ -99,6 +104,7 @@ def _format_report_text(report, reported_name: str, total_reports: int) -> str:
         f"📊 Всего жалоб на профиль: {total_reports}\n"
         f"📝 Причина: {html.escape(report.reason)}\n"
         f"👤 От: <code>{report.from_user}</code>"
+        f"{photo_line}"
     )
 
 
@@ -129,7 +135,15 @@ async def admin_reports(message: Message) -> None:
             ],
         ])
 
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        if report.photo_id:
+            await message.answer_photo(
+                photo=report.photo_id,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+        else:
+            await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     if len(reports) > 10:
         await message.answer(f"... и ещё {len(reports) - 10} жалоб.")
@@ -149,12 +163,19 @@ async def report_dismiss(callback: CallbackQuery) -> None:
         reported_name = html.escape(reported.name) if reported else "удалён"
         total_reports = report_service.count_for_user(report.reported_user)
         original_text = _format_report_text(report, reported_name, total_reports)
+        result_text = original_text + "\n\n✅ <b>Отклонена</b>"
 
         await callback.answer("✅ Жалоба отклонена.")
-        await callback.message.edit_text(
-            original_text + "\n\n✅ <b>Отклонена</b>",
-            parse_mode=ParseMode.HTML,
-        )
+        if report.photo_id:
+            await callback.message.edit_caption(
+                caption=result_text,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await callback.message.edit_text(
+                result_text,
+                parse_mode=ParseMode.HTML,
+            )
     else:
         await callback.answer("⚠️ Жалоба не найдена.")
 
@@ -180,12 +201,19 @@ async def report_ban(callback: CallbackQuery) -> None:
         reported_name = html.escape(reported.name) if reported else "удалён"
         total_reports = report_service.count_for_user(report.reported_user)
         original_text = _format_report_text(report, reported_name, total_reports)
+        result_text = original_text + "\n\n🔨 <b>Забанен</b>"
 
         await callback.answer("🔨 Пользователь забанен.")
-        await callback.message.edit_text(
-            original_text + "\n\n🔨 <b>Забанен</b>",
-            parse_mode=ParseMode.HTML,
-        )
+        if report.photo_id:
+            await callback.message.edit_caption(
+                caption=result_text,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await callback.message.edit_text(
+                result_text,
+                parse_mode=ParseMode.HTML,
+            )
         try:
             await callback.bot.send_message(
                 report.reported_user,
@@ -309,6 +337,125 @@ async def admin_unban_execute(message: Message, state: FSMContext) -> None:
             pass
     else:
         await message.answer(f"⚠️ Профиль {user_id} не найден.", reply_markup=ADMIN_MENU_KB)
+
+
+# ============================================================
+# Заявки на разбан
+# ============================================================
+
+def _format_unban_text(req, user_name: str) -> str:
+    ts = time.strftime("%d.%m.%Y %H:%M", time.localtime(req.timestamp))
+    return (
+        f"📨 <b>Заявка на разбан #{req.id}</b>\n"
+        f"📅 {ts}\n"
+        f"👤 От: {user_name} (ID: <code>{req.user_id}</code>)\n"
+        f"📝 Причина: {html.escape(req.reason)}"
+    )
+
+
+@admin_router.message(F.text == "📨 Заявки на разбан")
+async def admin_unban_requests(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    requests = unban_service.get_unresolved()
+    if not requests:
+        await message.answer("✅ Нет заявок на разбан.", reply_markup=ADMIN_MENU_KB)
+        return
+
+    for req in requests[:10]:
+        profile = profile_service.get_profile(req.user_id)
+        user_name = html.escape(profile.name) if profile else "удалён"
+        total_reports = report_service.count_for_user(req.user_id)
+
+        text = _format_unban_text(req, user_name)
+        text += f"\n⚠️ Жалоб на профиль: {total_reports}"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban_accept_{req.id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"unban_reject_{req.id}"),
+            ],
+            [
+                InlineKeyboardButton(text="👤 Анкета", callback_data=f"report_view_{req.user_id}"),
+            ],
+        ])
+
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    if len(requests) > 10:
+        await message.answer(f"... и ещё {len(requests) - 10} заявок.")
+
+
+@admin_router.callback_query(F.data.startswith("unban_accept_"))
+async def unban_accept(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("🚫 Нет доступа.")
+        return
+
+    req_id = int(callback.data.split("_")[-1])
+    req = unban_service.resolve(req_id, "accepted")
+
+    if req is None:
+        await callback.answer("⚠️ Заявка не найдена.")
+        return
+
+    unbanned = profile_service.unban_user(req.user_id)
+    profile = profile_service.get_profile(req.user_id)
+    user_name = html.escape(profile.name) if profile else "удалён"
+
+    original_text = _format_unban_text(req, user_name)
+
+    if unbanned:
+        await callback.answer("✅ Пользователь разбанен.")
+        await callback.message.edit_text(
+            original_text + "\n\n✅ <b>Разбанен</b>",
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            await callback.bot.send_message(
+                req.user_id,
+                "✅ Ваша заявка на разбан одобрена! Нажмите /start.",
+            )
+        except Exception:
+            pass
+    else:
+        await callback.answer("⚠️ Профиль не найден.")
+        await callback.message.edit_text(
+            original_text + "\n\n⚠️ <b>Профиль не найден</b>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@admin_router.callback_query(F.data.startswith("unban_reject_"))
+async def unban_reject(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("🚫 Нет доступа.")
+        return
+
+    req_id = int(callback.data.split("_")[-1])
+    req = unban_service.resolve(req_id, "rejected")
+
+    if req is None:
+        await callback.answer("⚠️ Заявка не найдена.")
+        return
+
+    profile = profile_service.get_profile(req.user_id)
+    user_name = html.escape(profile.name) if profile else "удалён"
+    original_text = _format_unban_text(req, user_name)
+
+    await callback.answer("❌ Заявка отклонена.")
+    await callback.message.edit_text(
+        original_text + "\n\n❌ <b>Отклонена</b>",
+        parse_mode=ParseMode.HTML,
+    )
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            "❌ Ваша заявка на разбан отклонена.",
+        )
+    except Exception:
+        pass
 
 
 # ============================================================

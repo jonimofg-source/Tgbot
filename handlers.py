@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.base import StorageKey
 
-from services import profile_service, match_service, report_service, chat_service
+from services import profile_service, match_service, report_service, chat_service, unban_service
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -36,6 +36,11 @@ class EditState(StatesGroup):
 
 
 class ReportState(StatesGroup):
+    reason = State()
+    photo = State()
+
+
+class UnbanAppealState(StatesGroup):
     reason = State()
 
 
@@ -99,6 +104,16 @@ CHAT_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+REPORT_PHOTO_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="⏩ Без фото")]],
+    resize_keyboard=True, one_time_keyboard=True,
+)
+
+BANNED_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="📨 Подать заявку на разбан")]],
+    resize_keyboard=True, one_time_keyboard=True,
+)
+
 # --- Maps ---
 
 GENDER_MAP = {"👨 парень": "male", "👩 девушка": "female"}
@@ -148,7 +163,18 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id
 
     if profile_service.is_banned(user_id):
-        await message.answer("🚫 Ваш аккаунт заблокирован.", reply_markup=ReplyKeyboardRemove())
+        if unban_service.has_pending(user_id):
+            await message.answer(
+                "🚫 Ваш аккаунт заблокирован.\n"
+                "📨 Ваша заявка на разбан уже отправлена. Ожидайте решения.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        else:
+            await message.answer(
+                "🚫 Ваш аккаунт заблокирован.\n"
+                "Вы можете подать заявку на разбан.",
+                reply_markup=BANNED_KB,
+            )
         return
 
     if profile_service.has_profile(user_id):
@@ -599,8 +625,39 @@ async def report_reason(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Введи причину (1–300 символов):")
         return
 
+    await state.update_data(report_reason=reason)
+    await state.set_state(ReportState.photo)
+    await message.answer(
+        "📷 Приложи фото-доказательство или нажми «Без фото»:",
+        reply_markup=REPORT_PHOTO_KB,
+    )
+
+
+@router.message(ReportState.reason)
+async def report_reason_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Отправь текстовое описание причины жалобы:")
+
+
+@router.message(ReportState.photo, F.photo)
+async def report_photo(message: Message, state: FSMContext) -> None:
+    photo_id = message.photo[-1].file_id
+    await _submit_report(message, state, photo_id=photo_id)
+
+
+@router.message(ReportState.photo, F.text == "⏩ Без фото")
+async def report_photo_skip(message: Message, state: FSMContext) -> None:
+    await _submit_report(message, state, photo_id=None)
+
+
+@router.message(ReportState.photo)
+async def report_photo_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Отправь фото или нажми «⏩ Без фото»:", reply_markup=REPORT_PHOTO_KB)
+
+
+async def _submit_report(message: Message, state: FSMContext, photo_id: str | None) -> None:
     data = await state.get_data()
     target_id = data.get("report_target")
+    reason = data.get("report_reason", "")
     if target_id is None:
         await state.clear()
         await message.answer("⚠️ Ошибка. Попробуй заново.", reply_markup=MAIN_MENU_KB)
@@ -610,6 +667,7 @@ async def report_reason(message: Message, state: FSMContext) -> None:
         from_user=message.from_user.id,
         reported_user=target_id,
         reason=reason,
+        photo_id=photo_id,
     )
     logger.info("Жалоба #%d от %d на %d: %s", report.id, message.from_user.id, target_id, reason)
 
@@ -618,11 +676,6 @@ async def report_reason(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer("✅ Жалоба отправлена. Спасибо!", reply_markup=MAIN_MENU_KB)
-
-
-@router.message(ReportState.reason)
-async def report_reason_invalid(message: Message, state: FSMContext) -> None:
-    await message.answer("⚠️ Отправь текстовое описание причины жалобы:")
 
 
 # ============================================================
@@ -813,6 +866,71 @@ async def chat_relay_voice(message: Message, state: FSMContext) -> None:
 @router.message(ChatState.active)
 async def chat_relay_unsupported(message: Message, state: FSMContext) -> None:
     await message.answer("⚠️ Этот тип сообщений не поддерживается в чате. Отправь текст, фото, стикер или голосовое.")
+
+
+# ============================================================
+# Навигация
+# ============================================================
+
+# ============================================================
+# Заявка на разбан
+# ============================================================
+
+@router.message(F.text == "📨 Подать заявку на разбан")
+async def unban_appeal_start(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    if not profile_service.is_banned(user_id):
+        await message.answer("✅ Ваш аккаунт не заблокирован.", reply_markup=MAIN_MENU_KB)
+        return
+    if unban_service.has_pending(user_id):
+        await message.answer(
+            "📨 Ваша заявка уже отправлена. Ожидайте решения.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await state.set_state(UnbanAppealState.reason)
+    await message.answer(
+        "📝 Напишите причину, по которой вас стоит разбанить (1–500 символов):",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="❌ Отмена")]],
+            resize_keyboard=True, one_time_keyboard=True,
+        ),
+    )
+
+
+@router.message(UnbanAppealState.reason, F.text == "❌ Отмена")
+async def unban_appeal_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("👌 Заявка отменена.", reply_markup=BANNED_KB)
+
+
+@router.message(UnbanAppealState.reason, F.text)
+async def unban_appeal_submit(message: Message, state: FSMContext) -> None:
+    reason = message.text.strip()
+    if not reason or len(reason) > 500:
+        await message.answer("⚠️ Введите причину (1–500 символов):")
+        return
+
+    user_id = message.from_user.id
+    req = unban_service.submit(user_id, reason)
+    await state.clear()
+
+    if req:
+        logger.info("Заявка на разбан #%d от %d: %s", req.id, user_id, reason)
+        await message.answer(
+            "✅ Заявка на разбан отправлена. Ожидайте решения администратора.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await message.answer(
+            "📨 У вас уже есть активная заявка. Ожидайте решения.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+
+@router.message(UnbanAppealState.reason)
+async def unban_appeal_invalid(message: Message, state: FSMContext) -> None:
+    await message.answer("⚠️ Отправьте текстовое сообщение с причиной:")
 
 
 # ============================================================
