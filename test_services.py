@@ -230,6 +230,12 @@ class TestReportRepository(unittest.TestCase):
         result = self.repo.resolve(999, "dismissed")
         self.assertIsNone(result)
 
+    def test_resolve_already_resolved(self):
+        r = self.repo.add(100, 200, "Спам")
+        self.repo.resolve(r.id, "dismissed")
+        result = self.repo.resolve(r.id, "banned")
+        self.assertIsNone(result)
+
     def test_count_for_user(self):
         self.repo.add(100, 200, "Спам")
         self.repo.add(101, 200, "Фейк")
@@ -593,6 +599,12 @@ class TestUnbanRequestRepository(unittest.TestCase):
 
     def test_resolve_nonexistent(self):
         self.assertIsNone(self.repo.resolve(999, "accepted"))
+
+    def test_resolve_already_resolved(self):
+        r = self.repo.add(100, "Причина")
+        self.repo.resolve(r.id, "accepted")
+        result = self.repo.resolve(r.id, "rejected")
+        self.assertIsNone(result)
 
     def test_has_pending(self):
         self.assertFalse(self.repo.has_pending(100))

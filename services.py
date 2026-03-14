@@ -47,6 +47,7 @@ def _safe_load_json(path: str, default: object = None) -> object:
 
 def _atomic_save_json(path: str, data: object) -> None:
     dir_name = os.path.dirname(path) or "."
+    tmp_path = None
     try:
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -54,10 +55,11 @@ def _atomic_save_json(path: str, data: object) -> None:
         os.replace(tmp_path, path)
     except OSError as e:
         logger.error("Ошибка записи %s: %s", path, e)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # --- Data models ---
@@ -313,7 +315,7 @@ class ReportRepository:
 
     def resolve(self, report_id: int, resolution: str) -> Optional[Report]:
         report = self.get_by_id(report_id)
-        if report is None:
+        if report is None or report.resolved:
             return None
         report.resolved = True
         report.resolution = resolution
@@ -379,7 +381,7 @@ class UnbanRequestRepository:
 
     def resolve(self, req_id: int, resolution: str) -> Optional[UnbanRequest]:
         req = self.get_by_id(req_id)
-        if req is None:
+        if req is None or req.resolved:
             return None
         req.resolved = True
         req.resolution = resolution
