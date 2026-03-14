@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from handlers import router
+from admin import admin_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +20,7 @@ async def main() -> None:
     bot = Bot(token=TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+    dp.include_router(admin_router)
     dp.include_router(router)
     logger.info("Бот запущен")
     await dp.start_polling(bot)
