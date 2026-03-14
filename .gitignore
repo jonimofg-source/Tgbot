@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+profiles.json
+likes.json
+skips.json
+reports.json
+*.tmp
+*.corrupted
