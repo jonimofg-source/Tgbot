@@ -44,6 +44,7 @@ USER_MAIN_MENU_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👤 Моя анкета"), KeyboardButton(text="💘 Смотреть анкеты")],
         [KeyboardButton(text="✏️ Редактировать"), KeyboardButton(text="🗑 Удалить анкету")],
+        [KeyboardButton(text="⏸ Пауза")],
     ],
     resize_keyboard=True,
 )
@@ -82,6 +83,7 @@ async def admin_stats(message: Message) -> None:
         f"👥 Всего анкет: {p_stats['total']}\n"
         f"📷 С фото: {p_stats['with_photo']}\n"
         f"🚫 Забанено: {p_stats['banned']}\n"
+        f"⏸ На паузе: {p_stats['paused']}\n"
         f"❤️ Всего лайков: {m_stats['total_likes']}\n"
         f"💬 Активных чатов: {c_stats['active_chats']}\n"
         f"⚠️ Нерешённых жалоб: {unresolved}\n"
@@ -241,7 +243,12 @@ async def report_view_profile(callback: CallbackQuery) -> None:
 
     await callback.answer()
     text = profile_service.format_profile(profile)
-    status = "🚫 ЗАБАНЕН" if profile.banned else "✅ Активен"
+    if profile.banned:
+        status = "🚫 ЗАБАНЕН"
+    elif profile.paused:
+        status = "⏸ На паузе"
+    else:
+        status = "✅ Активен"
     total_reports = report_service.count_for_user(user_id)
     full_text = f"{text}\n\n📊 Статус: {status}\n⚠️ Жалоб: {total_reports}\n🆔 ID: {user_id}"
 

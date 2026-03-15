@@ -75,6 +75,7 @@ class Profile:
     bio: str
     photo_id: Optional[str] = None
     banned: bool = False
+    paused: bool = False
 
 
 @dataclass
@@ -143,6 +144,7 @@ class ProfileRepository:
                 try:
                     item.setdefault("photo_id", None)
                     item.setdefault("banned", False)
+                    item.setdefault("paused", False)
                     p = Profile(**item)
                     self._profiles[p.user_id] = p
                 except (TypeError, KeyError) as e:
@@ -498,6 +500,19 @@ class ProfileService:
         self._repo.update(profile)
         return True
 
+    def is_paused(self, user_id: int) -> bool:
+        p = self._repo.get(user_id)
+        return p is not None and p.paused
+
+    def toggle_pause(self, user_id: int) -> Optional[bool]:
+        """Toggle pause state. Returns new paused value, or None if profile not found."""
+        profile = self._repo.get(user_id)
+        if profile is None:
+            return None
+        profile.paused = not profile.paused
+        self._repo.update(profile)
+        return profile.paused
+
     def delete_profile(self, user_id: int) -> bool:
         return self._repo.delete(user_id)
 
@@ -519,7 +534,8 @@ class ProfileService:
         total = len(profiles)
         banned = sum(1 for p in profiles if p.banned)
         with_photo = sum(1 for p in profiles if p.photo_id)
-        return {"total": total, "banned": banned, "with_photo": with_photo}
+        paused = sum(1 for p in profiles if p.paused)
+        return {"total": total, "banned": banned, "with_photo": with_photo, "paused": paused}
 
 
 class MatchService:
@@ -548,7 +564,7 @@ class MatchService:
         for profile in self._profile_repo.all_profiles():
             if profile.user_id in excluded:
                 continue
-            if profile.banned:
+            if profile.banned or profile.paused:
                 continue
             if user_profile.looking_for != "any" and profile.gender != user_profile.looking_for:
                 continue

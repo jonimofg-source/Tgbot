@@ -25,9 +25,9 @@ class TestProfileRepository(unittest.TestCase):
         if os.path.exists(self.DATA_FILE):
             os.unlink(self.DATA_FILE)
 
-    def _make_profile(self, uid=1, photo_id=None, banned=False):
+    def _make_profile(self, uid=1, photo_id=None, banned=False, paused=False):
         return Profile(uid, "Тест", 25, "male", "female", "Москва", "Привет",
-                       photo_id=photo_id, banned=banned)
+                       photo_id=photo_id, banned=banned, paused=paused)
 
     def test_create_and_get(self):
         p = self._make_profile()
@@ -83,6 +83,11 @@ class TestProfileRepository(unittest.TestCase):
         self.repo.create(self._make_profile(2))
         self.assertEqual(self.repo.count(), 2)
 
+    def test_paused_stored(self):
+        p = self._make_profile(paused=True)
+        self.repo.create(p)
+        self.assertTrue(self.repo.get(1).paused)
+
     def test_backward_compat_load(self):
         """Old profiles without photo_id/banned should load fine."""
         data = [{"user_id": 1, "name": "Old", "age": 20, "gender": "male",
@@ -97,6 +102,7 @@ class TestProfileRepository(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertIsNone(p.photo_id)
         self.assertFalse(p.banned)
+        self.assertFalse(p.paused)
 
 
 class TestLikeRepository(unittest.TestCase):
@@ -379,6 +385,22 @@ class TestProfileService(unittest.TestCase):
         self.assertTrue(self.service.delete_profile(1))
         self.assertFalse(self.service.has_profile(1))
 
+    def test_toggle_pause(self):
+        self.service.create_profile(1, "A", 20, "male", "female", "M", "X")
+        self.assertFalse(self.service.is_paused(1))
+        result = self.service.toggle_pause(1)
+        self.assertTrue(result)
+        self.assertTrue(self.service.is_paused(1))
+        result = self.service.toggle_pause(1)
+        self.assertFalse(result)
+        self.assertFalse(self.service.is_paused(1))
+
+    def test_toggle_pause_nonexistent(self):
+        self.assertIsNone(self.service.toggle_pause(999))
+
+    def test_is_paused_no_profile(self):
+        self.assertFalse(self.service.is_paused(999))
+
     def test_format_profile_male(self):
         p = Profile(1, "Иван", 25, "male", "female", "Москва", "Привет")
         text = self.service.format_profile(p)
@@ -400,6 +422,10 @@ class TestProfileService(unittest.TestCase):
         self.assertEqual(stats["total"], 2)
         self.assertEqual(stats["with_photo"], 1)
         self.assertEqual(stats["banned"], 1)
+        self.assertEqual(stats["paused"], 0)
+        self.service.toggle_pause(1)
+        stats = self.service.stats()
+        self.assertEqual(stats["paused"], 1)
 
 
 class TestMatchService(unittest.TestCase):
@@ -440,6 +466,11 @@ class TestMatchService(unittest.TestCase):
 
     def test_get_next_excludes_banned(self):
         self.profile_repo.get(2).banned = True
+        candidate = self.service.get_next_profile(1)
+        self.assertEqual(candidate.user_id, 3)
+
+    def test_get_next_excludes_paused(self):
+        self.profile_repo.get(2).paused = True
         candidate = self.service.get_next_profile(1)
         self.assertEqual(candidate.user_id, 3)
 

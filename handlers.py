@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.base import StorageKey
 
-from services import profile_service, match_service, report_service, chat_service, unban_service
+from services import profile_service, match_service, report_service, chat_service, unban_service, ADMIN_IDS
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ MAIN_MENU_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👤 Моя анкета"), KeyboardButton(text="💘 Смотреть анкеты")],
         [KeyboardButton(text="✏️ Редактировать"), KeyboardButton(text="🗑 Удалить анкету")],
+        [KeyboardButton(text="⏸ Пауза")],
     ],
     resize_keyboard=True,
 )
@@ -151,6 +152,15 @@ async def _send_profile(message: Message, profile, reply_markup=None):
         )
     else:
         await message.answer(text, reply_markup=reply_markup)
+
+
+async def _notify_admins(bot, text: str) -> None:
+    """Send a notification to all admins."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -328,7 +338,8 @@ async def show_my_profile(message: Message, state: FSMContext) -> None:
     if profile is None:
         await message.answer("😔 У тебя ещё нет анкеты. Нажми /start, чтобы создать.")
         return
-    await message.answer("📋 Твоя анкета:")
+    status = "⏸ На паузе" if profile.paused else ""
+    await message.answer(f"📋 Твоя анкета: {status}" if status else "📋 Твоя анкета:")
     await _send_profile(message, profile, reply_markup=MAIN_MENU_KB)
 
 
@@ -489,6 +500,31 @@ async def edit_enter_value_invalid(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
+# Пауза анкеты
+# ============================================================
+
+@router.message(F.text == "⏸ Пауза")
+async def toggle_pause(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    user_id = message.from_user.id
+    if not profile_service.has_profile(user_id):
+        await message.answer("😔 У тебя нет анкеты. Нажми /start, чтобы создать.")
+        return
+    new_paused = profile_service.toggle_pause(user_id)
+    if new_paused:
+        await message.answer(
+            "⏸ Анкета на паузе. Тебя не увидят другие пользователи.\n"
+            "Нажми «⏸ Пауза» ещё раз, чтобы снять паузу.",
+            reply_markup=MAIN_MENU_KB,
+        )
+    else:
+        await message.answer(
+            "▶️ Анкета снова активна! Тебя увидят другие пользователи.",
+            reply_markup=MAIN_MENU_KB,
+        )
+
+
+# ============================================================
 # Просмотр анкет
 # ============================================================
 
@@ -557,7 +593,8 @@ async def like_profile(message: Message, state: FSMContext) -> None:
 
     next_candidate = match_service.get_next_profile(user_id)
     if next_candidate is None:
-        await message.answer("😴 Анкеты закончились. Загляни позже!", reply_markup=MAIN_MENU_KB)
+        if not is_match:
+            await message.answer("😴 Анкеты закончились. Загляни позже!", reply_markup=MAIN_MENU_KB)
         return
 
     await state.update_data(current_candidate=next_candidate.user_id)
@@ -676,6 +713,13 @@ async def _submit_report(message: Message, state: FSMContext, photo_id: str | No
 
     await state.clear()
     await message.answer("✅ Жалоба отправлена. Спасибо!", reply_markup=MAIN_MENU_KB)
+
+    await _notify_admins(
+        message.bot,
+        f"🚨 <b>Новая жалоба #{report.id}</b>\n"
+        f"На пользователя <code>{target_id}</code>\n"
+        f"Причина: {html.escape(reason)}",
+    )
 
 
 # ============================================================
@@ -916,6 +960,12 @@ async def unban_appeal_submit(message: Message, state: FSMContext) -> None:
         await message.answer(
             "✅ Заявка на разбан отправлена. Ожидайте решения администратора.",
             reply_markup=ReplyKeyboardRemove(),
+        )
+        await _notify_admins(
+            message.bot,
+            f"📨 <b>Новая заявка на разбан #{req.id}</b>\n"
+            f"От пользователя <code>{user_id}</code>\n"
+            f"Причина: {html.escape(reason)}",
         )
     else:
         await message.answer(
