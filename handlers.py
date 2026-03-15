@@ -565,7 +565,6 @@ async def like_profile(message: Message, state: FSMContext) -> None:
                 candidate_id,
                 "❤️ Кто-то оценил твою анкету!\n"
                 "Заходи в «💘 Смотреть анкеты» — возможно, это взаимно!",
-                reply_markup=MAIN_MENU_KB,
             )
         except Exception as e:
             logger.warning("Не удалось уведомить %s о лайке: %s", candidate_id, e)
