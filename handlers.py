@@ -559,6 +559,17 @@ async def like_profile(message: Message, state: FSMContext) -> None:
 
     is_match = match_service.like(user_id, candidate_id)
 
+    if not is_match:
+        try:
+            await message.bot.send_message(
+                candidate_id,
+                "❤️ Кто-то оценил твою анкету!\n"
+                "Заходи в «💘 Смотреть анкеты» — возможно, это взаимно!",
+                reply_markup=MAIN_MENU_KB,
+            )
+        except Exception as e:
+            logger.warning("Не удалось уведомить %s о лайке: %s", candidate_id, e)
+
     if is_match:
         candidate = profile_service.get_profile(candidate_id)
         my_profile = profile_service.get_profile(user_id)
