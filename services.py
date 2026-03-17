@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass, asdict
@@ -128,273 +130,344 @@ class ChatSession:
         return None
 
 
+# --- Database ---
+
+class Database:
+    def __init__(self, path: str = "bot.db") -> None:
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.row_factory = sqlite3.Row
+        self._init_tables()
+
+    def _init_tables(self) -> None:
+        c = self._conn
+        c.execute("""CREATE TABLE IF NOT EXISTS profiles (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL,
+            gender TEXT NOT NULL,
+            looking_for TEXT NOT NULL,
+            city TEXT NOT NULL,
+            bio TEXT NOT NULL,
+            photo_id TEXT,
+            banned INTEGER NOT NULL DEFAULT 0,
+            paused INTEGER NOT NULL DEFAULT 0
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS likes (
+            from_user INTEGER NOT NULL,
+            to_user INTEGER NOT NULL,
+            PRIMARY KEY (from_user, to_user)
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS skips (
+            user_id INTEGER NOT NULL,
+            skipped_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, skipped_id)
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user INTEGER NOT NULL,
+            reported_user INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            timestamp REAL NOT NULL DEFAULT 0.0,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT '',
+            photo_id TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS unban_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            timestamp REAL NOT NULL DEFAULT 0.0,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT ''
+        )""")
+        c.commit()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._conn
+
+
 # --- Repositories ---
 
 class ProfileRepository:
-    DATA_FILE = "profiles.json"
+    def __init__(self, db: Database) -> None:
+        self._conn = db.conn
 
-    def __init__(self) -> None:
-        self._profiles: dict[int, Profile] = {}
-        self._load()
-
-    def _load(self) -> None:
-        data = _safe_load_json(self.DATA_FILE, default=[])
-        if isinstance(data, list):
-            for item in data:
-                try:
-                    item.setdefault("photo_id", None)
-                    item.setdefault("banned", False)
-                    item.setdefault("paused", False)
-                    p = Profile(**item)
-                    self._profiles[p.user_id] = p
-                except (TypeError, KeyError) as e:
-                    logger.warning("Пропущена некорректная анкета: %s", e)
-
-    def _save(self) -> None:
-        _atomic_save_json(self.DATA_FILE, [asdict(p) for p in self._profiles.values()])
+    def _row_to_profile(self, row) -> Profile:
+        return Profile(
+            user_id=row["user_id"],
+            name=row["name"],
+            age=row["age"],
+            gender=row["gender"],
+            looking_for=row["looking_for"],
+            city=row["city"],
+            bio=row["bio"],
+            photo_id=row["photo_id"],
+            banned=bool(row["banned"]),
+            paused=bool(row["paused"]),
+        )
 
     def get(self, user_id: int) -> Optional[Profile]:
-        return self._profiles.get(user_id)
+        row = self._conn.execute(
+            "SELECT * FROM profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_profile(row)
 
     def exists(self, user_id: int) -> bool:
-        return user_id in self._profiles
+        row = self._conn.execute(
+            "SELECT 1 FROM profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row is not None
 
     def create(self, profile: Profile) -> Profile:
-        self._profiles[profile.user_id] = profile
-        self._save()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO profiles "
+            "(user_id, name, age, gender, looking_for, city, bio, photo_id, banned, paused) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile.user_id, profile.name, profile.age, profile.gender,
+             profile.looking_for, profile.city, profile.bio, profile.photo_id,
+             int(profile.banned), int(profile.paused)),
+        )
+        self._conn.commit()
         return profile
 
     def update(self, profile: Profile) -> Profile:
-        self._profiles[profile.user_id] = profile
-        self._save()
+        self._conn.execute(
+            "UPDATE profiles SET name=?, age=?, gender=?, looking_for=?, "
+            "city=?, bio=?, photo_id=?, banned=?, paused=? WHERE user_id=?",
+            (profile.name, profile.age, profile.gender, profile.looking_for,
+             profile.city, profile.bio, profile.photo_id,
+             int(profile.banned), int(profile.paused), profile.user_id),
+        )
+        self._conn.commit()
         return profile
 
     def delete(self, user_id: int) -> bool:
-        if user_id in self._profiles:
-            del self._profiles[user_id]
-            self._save()
-            return True
-        return False
+        cursor = self._conn.execute(
+            "DELETE FROM profiles WHERE user_id = ?", (user_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def all_profiles(self) -> list[Profile]:
-        return list(self._profiles.values())
+        rows = self._conn.execute("SELECT * FROM profiles").fetchall()
+        return [self._row_to_profile(row) for row in rows]
 
     def count(self) -> int:
-        return len(self._profiles)
+        return self._conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
 
 
 class LikeRepository:
-    DATA_FILE = "likes.json"
-
-    def __init__(self) -> None:
-        self._likes: list[LikeRecord] = []
-        self._load()
-
-    def _load(self) -> None:
-        data = _safe_load_json(self.DATA_FILE, default=[])
-        if isinstance(data, list):
-            for item in data:
-                try:
-                    self._likes.append(LikeRecord(**item))
-                except (TypeError, KeyError) as e:
-                    logger.warning("Пропущена некорректная запись лайка: %s", e)
-
-    def _save(self) -> None:
-        _atomic_save_json(
-            self.DATA_FILE,
-            [{"from_user": lr.from_user, "to_user": lr.to_user} for lr in self._likes],
-        )
+    def __init__(self, db: Database) -> None:
+        self._conn = db.conn
 
     def add_like(self, from_user: int, to_user: int) -> None:
-        if not self.has_like(from_user, to_user):
-            self._likes.append(LikeRecord(from_user=from_user, to_user=to_user))
-            self._save()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO likes (from_user, to_user) VALUES (?, ?)",
+            (from_user, to_user),
+        )
+        self._conn.commit()
 
     def has_like(self, from_user: int, to_user: int) -> bool:
-        return any(lr.from_user == from_user and lr.to_user == to_user for lr in self._likes)
+        row = self._conn.execute(
+            "SELECT 1 FROM likes WHERE from_user = ? AND to_user = ?",
+            (from_user, to_user),
+        ).fetchone()
+        return row is not None
 
     def is_match(self, user_a: int, user_b: int) -> bool:
         return self.has_like(user_a, user_b) and self.has_like(user_b, user_a)
 
     def get_liked_by(self, user_id: int) -> list[int]:
-        return [lr.to_user for lr in self._likes if lr.from_user == user_id]
+        rows = self._conn.execute(
+            "SELECT to_user FROM likes WHERE from_user = ?", (user_id,)
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def get_who_liked(self, user_id: int) -> list[int]:
-        return [lr.from_user for lr in self._likes if lr.to_user == user_id]
+        rows = self._conn.execute(
+            "SELECT from_user FROM likes WHERE to_user = ?", (user_id,)
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def remove_user_likes(self, user_id: int) -> None:
-        self._likes = [lr for lr in self._likes if lr.from_user != user_id and lr.to_user != user_id]
-        self._save()
+        self._conn.execute(
+            "DELETE FROM likes WHERE from_user = ? OR to_user = ?",
+            (user_id, user_id),
+        )
+        self._conn.commit()
 
     def count(self) -> int:
-        return len(self._likes)
+        return self._conn.execute("SELECT COUNT(*) FROM likes").fetchone()[0]
 
 
 class SkipRepository:
-    DATA_FILE = "skips.json"
-
-    def __init__(self) -> None:
-        self._skips: dict[int, set[int]] = {}
-        self._load()
-
-    def _load(self) -> None:
-        data = _safe_load_json(self.DATA_FILE, default={})
-        if isinstance(data, dict):
-            for uid_str, skipped in data.items():
-                try:
-                    self._skips[int(uid_str)] = set(skipped)
-                except (ValueError, TypeError) as e:
-                    logger.warning("Пропущена некорректная запись пропуска: %s", e)
-
-    def _save(self) -> None:
-        _atomic_save_json(
-            self.DATA_FILE,
-            {str(k): list(v) for k, v in self._skips.items()},
-        )
+    def __init__(self, db: Database) -> None:
+        self._conn = db.conn
 
     def add_skip(self, user_id: int, skipped_id: int) -> None:
-        self._skips.setdefault(user_id, set()).add(skipped_id)
-        self._save()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO skips (user_id, skipped_id) VALUES (?, ?)",
+            (user_id, skipped_id),
+        )
+        self._conn.commit()
 
     def get_skipped(self, user_id: int) -> set[int]:
-        return set(self._skips.get(user_id, set()))
+        rows = self._conn.execute(
+            "SELECT skipped_id FROM skips WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def remove_user_skips(self, user_id: int) -> None:
-        self._skips.pop(user_id, None)
-        self._skips = {k: v - {user_id} for k, v in self._skips.items()}
-        self._save()
+        self._conn.execute(
+            "DELETE FROM skips WHERE user_id = ? OR skipped_id = ?",
+            (user_id, user_id),
+        )
+        self._conn.commit()
 
 
 class ReportRepository:
-    DATA_FILE = "reports.json"
+    def __init__(self, db: Database) -> None:
+        self._conn = db.conn
 
-    def __init__(self) -> None:
-        self._reports: list[Report] = []
-        self._next_id: int = 1
-        self._load()
-
-    def _load(self) -> None:
-        data = _safe_load_json(self.DATA_FILE, default=[])
-        if isinstance(data, list):
-            for item in data:
-                try:
-                    item.setdefault("timestamp", 0.0)
-                    item.setdefault("resolved", False)
-                    item.setdefault("resolution", "")
-                    item.setdefault("photo_id", None)
-                    self._reports.append(Report(**item))
-                except (TypeError, KeyError) as e:
-                    logger.warning("Пропущена некорректная жалоба: %s", e)
-            if self._reports:
-                self._next_id = max(r.id for r in self._reports) + 1
-
-    def _save(self) -> None:
-        _atomic_save_json(self.DATA_FILE, [asdict(r) for r in self._reports])
+    def _row_to_report(self, row) -> Report:
+        return Report(
+            id=row["id"],
+            from_user=row["from_user"],
+            reported_user=row["reported_user"],
+            reason=row["reason"],
+            timestamp=row["timestamp"],
+            resolved=bool(row["resolved"]),
+            resolution=row["resolution"],
+            photo_id=row["photo_id"],
+        )
 
     def add(self, from_user: int, reported_user: int, reason: str,
             photo_id: Optional[str] = None) -> Report:
-        report = Report(
-            id=self._next_id,
-            from_user=from_user,
-            reported_user=reported_user,
-            reason=reason,
-            timestamp=time.time(),
-            photo_id=photo_id,
+        cursor = self._conn.execute(
+            "INSERT INTO reports (from_user, reported_user, reason, timestamp, photo_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (from_user, reported_user, reason, time.time(), photo_id),
         )
-        self._next_id += 1
-        self._reports.append(report)
-        self._save()
-        return report
+        self._conn.commit()
+        return self._row_to_report(
+            self._conn.execute(
+                "SELECT * FROM reports WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        )
 
     def get_unresolved(self) -> list[Report]:
-        return [r for r in self._reports if not r.resolved]
+        rows = self._conn.execute(
+            "SELECT * FROM reports WHERE resolved = 0"
+        ).fetchall()
+        return [self._row_to_report(row) for row in rows]
 
     def get_by_id(self, report_id: int) -> Optional[Report]:
-        for r in self._reports:
-            if r.id == report_id:
-                return r
-        return None
+        row = self._conn.execute(
+            "SELECT * FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_report(row)
 
     def resolve(self, report_id: int, resolution: str) -> Optional[Report]:
         report = self.get_by_id(report_id)
         if report is None or report.resolved:
             return None
+        self._conn.execute(
+            "UPDATE reports SET resolved = 1, resolution = ? WHERE id = ?",
+            (resolution, report_id),
+        )
+        self._conn.commit()
         report.resolved = True
         report.resolution = resolution
-        self._save()
         return report
 
     def count_for_user(self, user_id: int) -> int:
-        return sum(1 for r in self._reports if r.reported_user == user_id)
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM reports WHERE reported_user = ?", (user_id,)
+        ).fetchone()[0]
 
     def count_unresolved(self) -> int:
-        return len(self.get_unresolved())
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM reports WHERE resolved = 0"
+        ).fetchone()[0]
 
     def remove_user_reports(self, user_id: int) -> None:
-        self._reports = [r for r in self._reports if r.from_user != user_id and r.reported_user != user_id]
-        self._save()
+        self._conn.execute(
+            "DELETE FROM reports WHERE from_user = ? OR reported_user = ?",
+            (user_id, user_id),
+        )
+        self._conn.commit()
 
 
 class UnbanRequestRepository:
-    DATA_FILE = "unban_requests.json"
+    def __init__(self, db: Database) -> None:
+        self._conn = db.conn
 
-    def __init__(self) -> None:
-        self._requests: list[UnbanRequest] = []
-        self._next_id: int = 1
-        self._load()
-
-    def _load(self) -> None:
-        data = _safe_load_json(self.DATA_FILE, default=[])
-        if isinstance(data, list):
-            for item in data:
-                try:
-                    item.setdefault("timestamp", 0.0)
-                    item.setdefault("resolved", False)
-                    item.setdefault("resolution", "")
-                    self._requests.append(UnbanRequest(**item))
-                except (TypeError, KeyError) as e:
-                    logger.warning("Пропущена некорректная заявка на разбан: %s", e)
-            if self._requests:
-                self._next_id = max(r.id for r in self._requests) + 1
-
-    def _save(self) -> None:
-        _atomic_save_json(self.DATA_FILE, [asdict(r) for r in self._requests])
+    def _row_to_request(self, row) -> UnbanRequest:
+        return UnbanRequest(
+            id=row["id"],
+            user_id=row["user_id"],
+            reason=row["reason"],
+            timestamp=row["timestamp"],
+            resolved=bool(row["resolved"]),
+            resolution=row["resolution"],
+        )
 
     def add(self, user_id: int, reason: str) -> UnbanRequest:
-        req = UnbanRequest(
-            id=self._next_id,
-            user_id=user_id,
-            reason=reason,
-            timestamp=time.time(),
+        cursor = self._conn.execute(
+            "INSERT INTO unban_requests (user_id, reason, timestamp) VALUES (?, ?, ?)",
+            (user_id, reason, time.time()),
         )
-        self._next_id += 1
-        self._requests.append(req)
-        self._save()
-        return req
+        self._conn.commit()
+        return self._row_to_request(
+            self._conn.execute(
+                "SELECT * FROM unban_requests WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        )
 
     def get_unresolved(self) -> list[UnbanRequest]:
-        return [r for r in self._requests if not r.resolved]
+        rows = self._conn.execute(
+            "SELECT * FROM unban_requests WHERE resolved = 0"
+        ).fetchall()
+        return [self._row_to_request(row) for row in rows]
 
     def get_by_id(self, req_id: int) -> Optional[UnbanRequest]:
-        for r in self._requests:
-            if r.id == req_id:
-                return r
-        return None
+        row = self._conn.execute(
+            "SELECT * FROM unban_requests WHERE id = ?", (req_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_request(row)
 
     def resolve(self, req_id: int, resolution: str) -> Optional[UnbanRequest]:
         req = self.get_by_id(req_id)
         if req is None or req.resolved:
             return None
+        self._conn.execute(
+            "UPDATE unban_requests SET resolved = 1, resolution = ? WHERE id = ?",
+            (resolution, req_id),
+        )
+        self._conn.commit()
         req.resolved = True
         req.resolution = resolution
-        self._save()
         return req
 
     def has_pending(self, user_id: int) -> bool:
-        return any(r.user_id == user_id and not r.resolved for r in self._requests)
+        row = self._conn.execute(
+            "SELECT 1 FROM unban_requests WHERE user_id = ? AND resolved = 0",
+            (user_id,),
+        ).fetchone()
+        return row is not None
 
     def count_unresolved(self) -> int:
-        return len(self.get_unresolved())
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM unban_requests WHERE resolved = 0"
+        ).fetchone()[0]
 
 
 class ChatRepository:
@@ -505,7 +578,6 @@ class ProfileService:
         return p is not None and p.paused
 
     def toggle_pause(self, user_id: int) -> Optional[bool]:
-        """Toggle pause state. Returns new paused value, or None if profile not found."""
         profile = self._repo.get(user_id)
         if profile is None:
             return None
@@ -561,6 +633,7 @@ class MatchService:
         skipped_ids = self._skip_repo.get_skipped(user_id)
         excluded = liked_ids | skipped_ids | {user_id}
 
+        candidates = []
         for profile in self._profile_repo.all_profiles():
             if profile.user_id in excluded:
                 continue
@@ -568,8 +641,11 @@ class MatchService:
                 continue
             if user_profile.looking_for != "any" and profile.gender != user_profile.looking_for:
                 continue
-            return profile
-        return None
+            candidates.append(profile)
+
+        if not candidates:
+            return None
+        return random.choice(candidates)
 
     def cleanup_user(self, user_id: int) -> None:
         self._like_repo.remove_user_likes(user_id)
@@ -651,13 +727,119 @@ class ChatService:
         return {"active_chats": self._repo.active_count()}
 
 
+# --- Migration ---
+
+def _migrate_json_to_db(db: Database) -> None:
+    conn = db.conn
+    if conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0] > 0:
+        return
+
+    migrated = False
+
+    profiles_data = _safe_load_json("profiles.json", default=[])
+    if isinstance(profiles_data, list):
+        for item in profiles_data:
+            try:
+                item.setdefault("photo_id", None)
+                item.setdefault("banned", False)
+                item.setdefault("paused", False)
+                conn.execute(
+                    "INSERT OR IGNORE INTO profiles "
+                    "(user_id, name, age, gender, looking_for, city, bio, photo_id, banned, paused) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item["user_id"], item["name"], item["age"], item["gender"],
+                     item["looking_for"], item["city"], item["bio"],
+                     item.get("photo_id"), int(item.get("banned", False)),
+                     int(item.get("paused", False))),
+                )
+                migrated = True
+            except (TypeError, KeyError) as e:
+                logger.warning("Пропущена некорректная анкета при миграции: %s", e)
+
+    likes_data = _safe_load_json("likes.json", default=[])
+    if isinstance(likes_data, list):
+        for item in likes_data:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO likes (from_user, to_user) VALUES (?, ?)",
+                    (item["from_user"], item["to_user"]),
+                )
+                migrated = True
+            except (TypeError, KeyError) as e:
+                logger.warning("Пропущена некорректная запись лайка при миграции: %s", e)
+
+    skips_data = _safe_load_json("skips.json", default={})
+    if isinstance(skips_data, dict):
+        for uid_str, skipped in skips_data.items():
+            try:
+                uid = int(uid_str)
+                for sid in skipped:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO skips (user_id, skipped_id) VALUES (?, ?)",
+                        (uid, sid),
+                    )
+                    migrated = True
+            except (ValueError, TypeError) as e:
+                logger.warning("Пропущена некорректная запись пропуска при миграции: %s", e)
+
+    reports_data = _safe_load_json("reports.json", default=[])
+    if isinstance(reports_data, list):
+        for item in reports_data:
+            try:
+                item.setdefault("timestamp", 0.0)
+                item.setdefault("resolved", False)
+                item.setdefault("resolution", "")
+                item.setdefault("photo_id", None)
+                conn.execute(
+                    "INSERT OR IGNORE INTO reports "
+                    "(id, from_user, reported_user, reason, timestamp, resolved, resolution, photo_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item["id"], item["from_user"], item["reported_user"],
+                     item["reason"], item.get("timestamp", 0.0),
+                     int(item.get("resolved", False)),
+                     item.get("resolution", ""), item.get("photo_id")),
+                )
+                migrated = True
+            except (TypeError, KeyError) as e:
+                logger.warning("Пропущена некорректная жалоба при миграции: %s", e)
+
+    unban_data = _safe_load_json("unban_requests.json", default=[])
+    if isinstance(unban_data, list):
+        for item in unban_data:
+            try:
+                item.setdefault("timestamp", 0.0)
+                item.setdefault("resolved", False)
+                item.setdefault("resolution", "")
+                conn.execute(
+                    "INSERT OR IGNORE INTO unban_requests "
+                    "(id, user_id, reason, timestamp, resolved, resolution) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (item["id"], item["user_id"], item["reason"],
+                     item.get("timestamp", 0.0),
+                     int(item.get("resolved", False)),
+                     item.get("resolution", "")),
+                )
+                migrated = True
+            except (TypeError, KeyError) as e:
+                logger.warning("Пропущена некорректная заявка на разбан при миграции: %s", e)
+
+    conn.commit()
+    if migrated:
+        logger.info("Миграция данных из JSON в SQLite завершена.")
+
+
 # --- Singletons ---
 
-profile_repo = ProfileRepository()
-like_repo = LikeRepository()
-skip_repo = SkipRepository()
-report_repo = ReportRepository()
-unban_repo = UnbanRequestRepository()
+_db_path = ":memory:" if os.environ.get("TESTING") else "bot.db"
+_db = Database(_db_path)
+if not os.environ.get("TESTING"):
+    _migrate_json_to_db(_db)
+
+profile_repo = ProfileRepository(_db)
+like_repo = LikeRepository(_db)
+skip_repo = SkipRepository(_db)
+report_repo = ReportRepository(_db)
+unban_repo = UnbanRequestRepository(_db)
 chat_repo = ChatRepository()
 
 profile_service = ProfileService(profile_repo)

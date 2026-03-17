@@ -917,9 +917,26 @@ async def chat_relay_voice(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Не удалось отправить голосовое.")
 
 
+@router.message(ChatState.active, F.video_note)
+async def chat_relay_video_note(message: Message, state: FSMContext) -> None:
+    user_id = message.from_user.id
+    partner_id = chat_service.get_partner(user_id)
+
+    if partner_id is None:
+        await state.clear()
+        await message.answer("⚠️ Чат не активен.", reply_markup=MAIN_MENU_KB)
+        return
+
+    try:
+        await message.bot.send_video_note(partner_id, video_note=message.video_note.file_id)
+    except Exception as e:
+        logger.warning("Не удалось переслать видеосообщение %s: %s", partner_id, e)
+        await message.answer("⚠️ Не удалось отправить видеосообщение.")
+
+
 @router.message(ChatState.active)
 async def chat_relay_unsupported(message: Message, state: FSMContext) -> None:
-    await message.answer("⚠️ Этот тип сообщений не поддерживается в чате. Отправь текст, фото, стикер или голосовое.")
+    await message.answer("⚠️ Этот тип сообщений не поддерживается в чате. Отправь текст, фото, стикер, голосовое или кружок.")
 
 
 # ============================================================

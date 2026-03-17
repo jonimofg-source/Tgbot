@@ -8,6 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from handlers import router
 from admin import admin_router
+from middleware import BanCheckMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,6 +21,8 @@ async def main() -> None:
     bot = Bot(token=TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+    dp.message.middleware(BanCheckMiddleware())
+    dp.callback_query.middleware(BanCheckMiddleware())
     dp.include_router(admin_router)
     dp.include_router(router)
     logger.info("Бот запущен")
